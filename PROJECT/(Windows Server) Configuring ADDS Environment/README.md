@@ -1,1 +1,1 @@
-This project is mostly done by me and other member are just doing small parts of contibution
+This project is based on scenario and not real life environment
