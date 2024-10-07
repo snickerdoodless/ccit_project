@@ -8,8 +8,13 @@
 2. Install this on vscode:
    
 ```python
-pip install venv (destdir)
+pip install venv 
 ```
+
+```pyhton
+python -m venv (destdir)
+```
+
 ```python
 ./Scripts/activate
 ```
