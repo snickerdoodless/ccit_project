@@ -1,0 +1,118 @@
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/bionic64"
+  
+  config.vm.provider "virtualbox" do |vb|
+    vb.memory = "1024"
+  end
+
+  # Restart network services to ensure correct configuration
+  config.vm.provision "shell", inline: <<-SHELL
+    sudo systemctl restart systemd-networkd
+  SHELL
+
+  # Firewall VM
+  config.vm.define "firewall" do |firewall|
+    firewall.vm.hostname = "router"
+    
+    # Internet Gateway (using correct bridge interface)
+    firewall.vm.network "public_network", bridge: "Intel(R) Wireless-AC 9560"
+
+    # Expose Port 80 to Public
+    firewall.vm.network "forwarded_port", guest: 80, host: 8080, host_ip: "0.0.0.0"
+
+    # DMZ network
+    firewall.vm.network "private_network", ip: "192.168.20.21", virtualbox__intnet: "dmz_net"
+
+    # Internal network
+    firewall.vm.network "private_network", ip: "192.168.30.31", virtualbox__intnet: "int_net"
+
+    # Provision firewall with iptables rules and routing setup
+    firewall.vm.provision "shell", inline: <<-SHELL
+      sudo -i
+
+      # Preconfigure iptables-persistent to automatically save rules
+      echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
+      echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
+
+      apt-get update
+      apt-get full-upgrade -y
+      apt-get install -y iptables-persistent
+      
+      # Enable IP forwarding
+      sysctl -w net.ipv4.ip_forward=1
+      echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+      
+      # Clear existing rules
+      iptables -F
+      iptables -t nat -F
+      
+      # Set up NAT and forwarding rules
+      iptables -P FORWARD DROP
+      iptables -t nat -A POSTROUTING -o enp0s8 -j MASQUERADE
+      iptables -A FORWARD -i enp0s8 -o enp0s9 -m state --state RELATED,ESTABLISHED -j ACCEPT
+      iptables -A FORWARD -i enp0s9 -o enp0s8 -j ACCEPT
+      iptables -A FORWARD -i enp0s8 -o enp0s10 -m state --state RELATED,ESTABLISHED -j ACCEPT
+      iptables -A FORWARD -i enp0s10 -o enp0s8 -j ACCEPT
+      
+      # Allow HTTP to DMZ
+      iptables -A FORWARD -i enp0s8 -o enp0s9 -p tcp --dport 80 -j ACCEPT
+      iptables -t nat -A PREROUTING -i enp0s8 -p tcp --dport 80 -j DNAT --to-destination 192.168.20.22:80
+      
+      # Save iptables rules
+      netfilter-persistent save
+      
+      # Add Default Routing for Internet Gateway
+      while ! ip -4 addr show enp0s8 | grep -q "inet "; do
+        echo "Waiting for enp0s8 to be initialized..."
+        sleep 1
+      done
+
+      # Delete the current default route
+      ip route del default
+
+      # Dynamically fetch the default gateway from the routing table
+      GATEWAY_IP=$(ip route | grep default | grep enp0s8 | awk '{print $3}')
+
+      # Check if a gateway IP was successfully extracted
+      if [ -n "$GATEWAY_IP" ]; then
+        echo "Gateway IP set to: $GATEWAY_IP"
+        # Add the new default route through the extracted gateway IP
+        ip route add default via $GATEWAY_IP dev enp0s8
+      else
+        echo "Error: Failed to extract gateway IP."
+        exit 1
+      fi
+    SHELL
+  end
+
+  # DMZ Web Server VM
+  config.vm.define "dmz" do |dmz|
+    dmz.vm.hostname = "dmz"
+    dmz.vm.network "private_network", ip: "192.168.20.22", virtualbox__intnet: "dmz_net"
+
+    dmz.vm.provision "shell", inline: <<-SHELL
+      sudo -i
+      apt-get update
+      apt-get full-upgrade -y
+      apt-get install -y apache2
+      echo "<h1>Welcome to the DMZ Web Server</h1>" > /var/www/html/index.html
+      systemctl start apache2 && systemctl enable apache2
+      ip route del default
+      ip route add default via 192.168.20.21 dev enp0s8 
+    SHELL
+  end
+
+  # Internal Server VM
+  config.vm.define "internal" do |internal|
+    internal.vm.hostname = "internal"
+    internal.vm.network "private_network", ip: "192.168.30.32", virtualbox__intnet: "int_net"
+
+    internal.vm.provision "shell", inline: <<-SHELL
+      sudo -i
+      apt-get update
+      apt-get full-upgrade -y
+      ip route del default
+      ip route add default via 192.168.30.31 dev enp0s8 
+    SHELL
+  end
+end
