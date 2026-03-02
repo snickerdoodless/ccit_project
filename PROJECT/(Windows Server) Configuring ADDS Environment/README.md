@@ -1,1 +1,1 @@
-This project is based on scenario and not real life environment
+This project is based on scenario of real life environment
